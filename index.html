@@ -1,0 +1,410 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WMATA Visited Stops Tracker</title>
+    
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    // Removed primary-red/green from here, using hex codes directly in JS for reliability
+                    colors: {
+                        'bg-dark': '#0f172a',
+                    },
+                    fontFamily: {
+                        sans: ['Inter', 'sans-serif'],
+                    }
+                }
+            }
+        }
+    </script>
+    <style>
+        /* Ensure the body takes up the full viewport height */
+        html, body { height: 100%; margin: 0; }
+        
+        /* The main container must be flex to handle the fixed header/footer and scrolling main area */
+        .page-container {
+            display: flex;
+            flex-direction: column;
+            min-height: 100vh;
+            background-color: #0f172a;
+        }
+        
+        /* The main content area (map) must be flexible and scrollable */
+        #main-content {
+            flex-grow: 1;
+            overflow-y: auto; 
+            padding: 0.5rem;
+            display: flex; /* Added flex to center the map */
+            justify-content: center;
+        }
+
+        /* 1. NEW CONTAINER FOR IMAGE AND MARKERS (The Wrapper) */
+        #map-wrapper {
+            position: relative;
+            max-width: 800px; /* Limits max size on desktop */
+            width: 100%;
+            height: fit-content;
+            box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.5), 0 4px 6px -2px rgba(0, 0, 0, 0.05); 
+            border-radius: 0.75rem; 
+            border: 4px solid #374151;
+        }
+
+        /* 2. STYLES FOR THE MAP IMAGE */
+        #metro-map-image {
+            display: block;
+            width: 100%;
+            height: auto;
+        }
+        
+        /* 3. CONTAINER FOR DOTS - EXACTLY OVERLAYS THE IMAGE */
+        #map-container {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            pointer-events: none; /* Allows clicks to pass through to the markers */
+        }
+
+        /* Styling for the station markers */
+        .station-marker {
+            position: absolute;
+            width: 14px; 
+            height: 14px; 
+            border-radius: 50%;
+            cursor: pointer;
+            border: 2px solid #000000; /* No border as requested */
+            box-shadow: 0 0 3px rgba(0, 0, 0, 0.6);
+            transition: background-color 0.2s ease, transform 0.1s ease;
+            z-index: 10;
+            /* transform remains crucial for centering markers on their percentage coordinates */
+            transform: translate(-50%, -50%);
+            pointer-events: all; /* Important: Re-enable pointer events only for the marker dots */
+        }
+
+        .station-marker:active {
+            transform: translate(-50%, -50%) scale(0.9);
+        }
+    </style>
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, doc, onSnapshot, setDoc, setLogLevel } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        // Enable debug logging for Firebase
+        setLogLevel('Debug');
+        
+        // --- CONSTANTS FOR COLORS (Used directly in JS for reliability) ---
+        const COLOR_RED = '#B91C1C';
+        const COLOR_GREEN = '#10B981';
+
+        // --- GLOBAL VARIABLES (Provided by Canvas Environment) ---
+        const appId = 'wmata-tracker';
+        const firebaseConfig = {
+                apiKey: "AIzaSyBD8nGuODICCoqzdVAyscngRN-FF9OVCP8",
+                authDomain: "wmata-tracker-6e861.firebaseapp.com",
+                projectId: "wmata-tracker-6e861",
+                storageBucket: "wmata-tracker-6e861.firebasestorage.app",
+                messagingSenderId: "887617928395",
+                appId: "1:887617928395:web:95834a3ee3aa2321d5af4e",
+                measurementId: "G-12DJH61HQS"
+                };
+        const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+        
+        let db, auth, userId = null;
+        let isAuthReady = false;
+        
+        const getDocPath = (uid) => `/artifacts/${appId}/users/${uid}/visited_stations/status`;
+        
+        // --- 1. STATION DATA DEFINITION & CONSTANTS ---
+        const TOTAL_STATIONS = 98;
+        
+        // YOU MUST REPLACE THIS WITH YOUR COMPLETE AND ACCURATE COORDINATE DATA!
+        const stationsData = [
+            { id: 'shady-grove', name: 'Shady Grove', top: 27.6, left: 23.5 },
+            { id: 'rockville', name: 'Rockville', top: 29.5, left: 26 },
+            { id: 'twinbrook', name: 'Twinbrook', top: 31.3, left: 28 },
+            { id: 'north-bethesda', name: 'North Bethesda', top: 33.3, left: 30.3 },
+            { id: 'grosvenor-strathmore', name: 'Grosvenor-Strathmore', top: 35, left: 32.5 },
+            { id: 'medical-center', name: 'Medical Center', top: 37, left: 34.9 },
+            { id: 'bethesda', name: 'Bethesda', top: 38.9, left: 37.2 },
+            { id: 'friendship-heights', name: 'Friendship Heights', top: 40.5, left: 39.2, transfer: true },
+            { id: 'tenleytown-au', name: 'Tenleytown-AU', top: 41.5, left: 41, transfer: true },
+            { id: 'van-ness-udc', name: 'Van Ness-UDC', top: 41.8, left: 43, transfer: true },
+            { id: 'cleveland-park', name: 'Cleveland Park', top: 42.8, left: 44.2 },
+            { id: 'woodley-park', name: 'Woodley Park', top: 44.1, left: 45.8 },
+            { id: 'dupont-circle', name: 'Dupont Circle', top: 45.5, left: 47.4 },
+            { id: 'farragut-north', name: 'Farragut North', top: 47, left: 48.7 },
+            { id: 'metro-center', name: 'Metro Center', top: 52.9, left: 53 },
+            { id: 'gallery-place', name: 'Gallery Place', top: 52.9, left: 59 },
+            { id: 'judiciary-sq', name: 'Judiciary Sq', top: 52.9, left: 63 },
+            { id: 'union-station', name: 'Union Station', top: 51.4, left: 67 },
+            { id: 'noma-gallaudet-u', name: 'NoMa-Gallaudet U', top: 49.4, left: 67 },
+            { id: 'rhode-island-ave', name: 'Rhode Island Av', top: 47.2, left: 67 },
+            { id: 'brookland-cua', name: 'Brookland-CUA', top: 45.1, left: 67 },
+            { id: 'fort-totten', name: 'Fort Totten', top: 40.3, left: 62.4 },
+            { id: 'takoma', name: 'Takoma', top: 35, left: 56 },
+            { id: 'silver-spring', name: '', top: 30.2, left: 55.17 },
+            { id: 'forest-glen', name: 'Forest Glen', top: 28.2, left: 55.17 },
+            { id: 'wheaton', name: 'Wheaton', top: 26.2, left: 55.17 },
+            { id: 'glenmont', name: 'Glenmont', top: 24.2, left: 55.17 },
+            { id: 'ashburn', name: 'Ashburn', top: 41.4, left: 5.2 },
+            { id: 'loudoun-gateway', name: 'Loudoun Gateway', top: 42.4, left: 6.6 },
+            { id: 'dulles', name: 'Washington Dulles International Airport', top: 43.6, left: 8 },
+            { id: 'innovation-center', name: 'Innovation Center', top: 45, left: 9.7 },
+            { id: 'herndon', name: 'Herndon', top: 46.4, left: 11.3 },
+            { id: 'reston-town-center', name: 'Reston Town Center', top: 47.6, left: 12.5 },
+            { id: 'wiehle-reston-east', name: 'Wiehle-Reston East', top: 48.8, left: 14.2 },
+            { id: 'spring-hill ', name: 'Spring Hill', top: 50, left: 15.6 },
+            { id: 'greensboro', name: 'Greensboro', top: 51.2, left: 17.2 },
+            { id: 'tysons', name: 'Tysons', top: 52.4, left: 18.6 },
+            { id: 'mclean', name: 'McLean', top: 53.6, left: 20 },
+            { id: 'east-falls-church', name: 'East Falls Church', top: 55.6, left: 23.98 },
+            { id: 'ballston-mu', name: 'Ballston-MU', top: 55.6, left: 26.7 },
+            { id: 'virginia-sq-gmu', name: 'Virginia Sq-GMU', top: 55.6, left: 29 },
+            { id: 'clarendon', name: 'Clarendon', top: 55.6, left: 31.3 },
+            { id: 'court-house', name: 'Court House', top: 55.6, left: 33.4 },
+            { id: 'rosslyn', name: 'Rosslyn', top: 53, left: 36.36 },
+            { id: 'foggy-bottom', name: 'Foggy Bottom-GWU', top: 49.6, left: 44 },
+            { id: 'farragut-west', name: 'Farragut West', top: 49.6, left: 46.4 },
+            { id: 'mcpherson-sq', name: 'McPherson Sq', top: 49.6, left: 50.62 },
+            { id: 'federal-triangle', name: 'Federal Triangle', top: 55.5, left: 53 },
+            { id: 'smithsonian', name: 'Smithsonian', top: 57.4, left: 53 },
+            { id: 'lenfant-plaza', name: 'L\'Enfant Plaza', top: 59.5, left: 59 },
+            { id: 'federal-center-sw', name: 'Federal Center SW', top: 59.5, left: 62.5 },
+            { id: 'capitol-south', name: 'Capitol South', top: 59.5, left: 65.7 },
+            { id: 'eastern-market', name: 'Eastern Market', top: 59, left: 68.5 },
+            { id: 'potomac-av', name: 'Potomac Av', top: 57.7, left: 70.3 },
+            { id: 'stadium-armory', name: 'Stadium-Armory', top: 57.1, left: 73.48 },
+            { id: 'minnesota-av', name: 'Minnesota Av', top: 55.3, left: 80.1 },
+            { id: 'deanwood', name: 'Deanwood', top: 53.6, left: 82 },
+            { id: 'cheverly', name: 'Cheverly', top: 52.2, left: 83.8 },
+            { id: 'landover', name: 'Landover', top: 50.6, left: 85.6 },
+            { id: 'new-carrollton', name: 'New Carrollton', top: 49.4, left: 87 },
+            { id: 'benning-rd', name: 'Benning Rd', top: 57.6, left: 82.2 },
+            { id: 'capitol-heights', name: 'Capitol Heights', top: 57.6, left: 84.5 },
+            { id: 'addison-rd', name: 'Addison Rd', top: 57.6, left: 86.7 },
+            { id: 'morgan-blvd', name: 'Morgan Blvd', top: 57.6, left: 89 },
+            { id: 'downtown-largo', name: 'Downton Largo', top: 57.6, left: 91.1 },
+            { id: 'franconia-springfield', name: 'Franconia-Springfield', top: 85.8, left: 34.3 },
+            { id: 'van-dorn-st', name: 'Van Dorn St', top: 81.3, left: 38.7 },
+            { id: 'king-st-old-town', name: 'King St-Old Town', top: 80, left: 50.8 },
+            { id: 'braddock-rd', name: 'Braddock Rd', top: 78, left: 50.8 },
+            { id: 'potomac-yard', name: 'Potomac Yard', top: 76.5, left: 50.8 },
+            { id: 'ronald-reagan-airport', name: 'Ronald Reagan Washington National Airport', top: 75, left: 50.8 },
+            { id: 'crystal-city', name: 'Crystal City', top: 73.5, left: 47.5 },
+            { id: 'pentagon-city', name: 'Pentagon City', top: 70.8, left: 45.8 },
+            { id: 'pentagon', name: 'Pentagon', top: 67.4, left: 45.8 },
+            { id: 'arlington-cemetary', name: 'Arlington Cemetary', top: 62.5, left: 41.6 },
+            { id: 'huntington', name: 'Huntington', top: 85.8, left: 51.5 },
+            { id: 'eisenhowever-av', name: 'Eisenhower Av', top: 82.8, left: 51.5 },
+            { id: 'archives', name: 'Archives', top: 55.3, left: 59 },
+            { id: 'mt-vernon-sq', name: 'Mt Vernon Sq', top: 50.3, left: 59 },
+            { id: 'shaw-howard-u', name: 'Shaw-Howard U', top: 47.7, left: 59.5 },
+            { id: 'u-st', name: 'U St', top: 44.9, left: 56.6 },
+            { id: 'columbia-heights', name: 'Columbia Heights', top: 43, left: 55 },
+            { id: 'georgia-av-petworth', name: 'Georgia Av-Petworth', top: 42, left: 56.6 },
+            { id: 'west-hyattsville', name: 'West Hyattsville', top: 37.3, left: 65.7 },
+            { id: 'hyattsville-crossing', name: 'Hyattsville Crossing', top: 36, left: 67.5 },
+            { id: 'college-park-u-of-md', name: 'College Park-U of Md', top: 34.6, left: 69.5 },
+            { id: 'greenbelt', name: 'Greenbelt', top: 32.9, left: 71.3 },
+            { id: 'waterfront', name: 'Waterfront', top: 66, left: 62.3 },
+            { id: 'navy-yard', name: 'Navy Yard-Ballpark', top: 66, left: 64.6 },
+            { id: 'anacostia', name: 'Anacostia', top: 67.3, left: 69 },
+            { id: 'congress-heights', name: 'Congress Heights', top: 68.8, left: 70.8 },
+            { id: 'southern-av', name: 'Southern Av', top: 69.7, left: 72.8 },
+            { id: 'naylor-rd', name: 'Naylor Rd', top: 69.3, left: 75.8 },
+            { id: 'suitland', name: 'Suitland', top: 70.8, left: 77.5 },
+            { id: 'branch-av', name: 'Branch Av', top: 72.3, left: 79.4 },
+            { id: 'vienna', name: 'Vienna', top: 55.1, left: 14.3 },
+            { id: 'dunn-loring', name: 'Dunn Loring', top: 55.1, left: 17 },
+            { id: 'west-falls-church', name: 'West Falls Church', top: 55.1, left: 20 }
+        ];
+
+        let visitedStations = {}; 
+
+        // --- 2. FIREBASE INITIALIZATION AND AUTHENTICATION ---
+        function initFirebase() {
+            try {
+                const app = initializeApp(firebaseConfig);
+                db = getFirestore(app);
+                auth = getAuth(app);
+                
+                onAuthStateChanged(auth, async (user) => {
+                    if (user) {
+                        userId = user.uid;
+                        isAuthReady = true;
+                        document.getElementById('status-message').textContent = 'Loading visited stations...';
+                        setupFirestoreListener();
+                    } else {
+                        if (initialAuthToken) {
+                            await signInWithCustomToken(auth, initialAuthToken);
+                        } else {
+                            await signInAnonymously(auth);
+                        }
+                    }
+                });
+            } catch (error) {
+                console.error("Firebase initialization or authentication failed:", error);
+                document.getElementById('status-message').textContent = 'ERROR: Firebase failed to load or connect.';
+            }
+        }
+
+        // --- 3. FIREBASE LISTENER AND STATE MANAGEMENT ---
+        function setupFirestoreListener() {
+            if (!db || !userId) return;
+            const docRef = doc(db, getDocPath(userId));
+            
+            onSnapshot(docRef, (docSnap) => {
+                if (docSnap.exists() && docSnap.data().stations) {
+                    visitedStations = docSnap.data().stations;
+                    const count = Object.keys(visitedStations).filter(k => visitedStations[k]).length;
+                    
+                    document.getElementById('status-message').textContent = `${count} / ${TOTAL_STATIONS} Stops`;
+                    
+                } else {
+                    visitedStations = {};
+                    document.getElementById('status-message').textContent = `0 / ${TOTAL_STATIONS} Stops`;
+                }
+                renderStations(); 
+            }, (error) => {
+                console.error("Firestore listener error:", error);
+                document.getElementById('status-message').textContent = 'ERROR: Could not fetch visited data.';
+            });
+        }
+
+        // Saves the updated state to Firestore
+        async function updateStationState(stationId, isVisited) {
+            if (!db || !userId || !isAuthReady) {
+                console.warn('Firebase not ready. State change is not persistent yet.');
+                return;
+            }
+
+            const docRef = doc(db, getDocPath(userId));
+
+            try {
+                await setDoc(docRef, { stations: visitedStations, lastUpdated: new Date().toISOString() }, { merge: true });
+                console.log(`Station ${stationId} persisted: ${isVisited ? 'Visited' : 'Not Visited'}`);
+            } catch (e) {
+                console.error("Error writing document: ", e);
+                document.getElementById('status-message').textContent = 'ERROR: Failed to save progress.';
+            }
+        }
+
+        // --- 4. UI RENDERING AND INTERACTIVITY ---
+        function handleStationClick(stationId) {
+            
+            const currentStatus = visitedStations[stationId] || false;
+            const newStatus = !currentStatus;
+            
+            // 1. **IMMEDIATE UI UPDATE**: Update the local state and the marker color right away
+            visitedStations[stationId] = newStatus;
+            const marker = document.getElementById(`marker-${stationId}`);
+            if (marker) {
+                 // Using hex codes directly for guaranteed color change
+                marker.style.backgroundColor = newStatus ? COLOR_GREEN : COLOR_RED;
+            }
+            
+            // Update the counter immediately
+            const count = Object.keys(visitedStations).filter(k => visitedStations[k]).length;
+            document.getElementById('status-message').textContent = `${count} / ${TOTAL_STATIONS} Stops`;
+
+            // 2. **ASYNCHRONOUS PERSISTENCE**: Save the updated state to Firebase in the background
+            updateStationState(stationId, newStatus);
+        }
+
+        function renderStations() {
+            const mapContainer = document.getElementById('map-container');
+            
+            // 1. Clear ALL existing markers (simplest, most reliable sync)
+            mapContainer.querySelectorAll('.station-marker').forEach(marker => marker.remove());
+
+            // 2. Re-create and append ALL markers based on current state
+            stationsData.forEach(station => {
+                const marker = document.createElement('div');
+                marker.className = 'station-marker';
+                marker.id = `marker-${station.id}`;
+                marker.style.top = `${station.top}%`;
+                marker.style.left = `${station.left}%`;
+
+                // Set color based on state (loaded from Firestore or set locally)
+                const isVisited = visitedStations[station.id] || false;
+                // Using hex codes directly for guaranteed initial color
+                marker.style.backgroundColor = isVisited ? COLOR_GREEN : COLOR_RED;
+
+                marker.onclick = () => handleStationClick(station.id);
+                
+                // Show station name on hover/tap
+                marker.onmouseover = marker.onfocus = () => {
+                    document.getElementById('station-label').textContent = station.name;
+                    document.getElementById('station-label').classList.remove('opacity-0');
+                };
+                marker.onmouseout = marker.onblur = () => {
+                    document.getElementById('station-label').classList.add('opacity-0');
+                };
+
+                mapContainer.appendChild(marker);
+            });
+        }
+        
+        window.onload = function() {
+            initFirebase();
+            renderStations(); 
+        };
+        
+        window.resetAllStations = async function() {
+             if (window.confirm("Are you sure you want to reset all visited stations? This action cannot be undone.")) {
+                 if (!db || !userId) {
+                    document.getElementById('status-message').textContent = 'Error: App not fully initialized.';
+                    return;
+                }
+                const docRef = doc(db, getDocPath(userId));
+                try {
+                    await setDoc(docRef, { stations: {}, lastUpdated: new Date().toISOString() });
+                    document.getElementById('status-message').textContent = 'All stations reset!';
+                } catch (e) {
+                    console.error("Error resetting document: ", e);
+                    document.getElementById('status-message').textContent = 'ERROR: Failed to reset progress.';
+                }
+            }
+        }
+    </script>
+</head>
+<body class="page-container">
+
+    <header class="p-4 bg-gray-800 shadow-lg z-20">
+        <h1 class="text-xl font-bold text-center text-white">WMATA Stops Tracker</h1>
+        <p id="station-label" class="text-center mt-1 text-yellow-300 transition-opacity opacity-0 font-medium h-6">Tap a circle to see the stop name!</p>
+        <div class="text-lg font-semibold text-center mt-2 p-1 bg-gray-700 rounded-lg text-white" id="status-message">Initializing...</div>
+    </header>
+
+    <div id="main-content">
+        <div id="map-wrapper">
+            <img 
+                id="metro-map-image" 
+                src="METRO.png" 
+                alt="WMATA Metro System Map"
+            >
+            
+            <div 
+                id="map-container"
+            >
+                </div>
+        </div>
+    </div>
+
+    <footer class="p-4 bg-gray-800 shadow-inner z-20 flex justify-center border-t border-gray-700">
+         <button 
+            onclick="window.resetAllStations()" 
+            class="px-4 py-2 bg-red-600 hover:bg-red-700 text-white font-bold rounded-full transition-all shadow-md active:shadow-lg"
+        >
+            Reset All Progress
+        </button>
+    </footer>
+
+</body>
+</html>

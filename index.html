@@ -255,27 +255,46 @@
         }
 
         // --- 3. FIREBASE LISTENER AND STATE MANAGEMENT ---
-        function setupFirestoreListener() {
-            if (!db || !userId) return;
-            const docRef = doc(db, getDocPath(userId));
-            
-            onSnapshot(docRef, (docSnap) => {
-                if (docSnap.exists() && docSnap.data().stations) {
-                    visitedStations = docSnap.data().stations;
-                    const count = Object.keys(visitedStations).filter(k => visitedStations[k]).length;
-                    
-                    document.getElementById('status-message').textContent = `${count} / ${TOTAL_STATIONS} Stops`;
-                    
-                } else {
-                    visitedStations = {};
-                    document.getElementById('status-message').textContent = `0 / ${TOTAL_STATIONS} Stops`;
-                }
-                renderStations(); 
-            }, (error) => {
-                console.error("Firestore listener error:", error);
-                document.getElementById('status-message').textContent = 'ERROR: Could not fetch visited data.';
-            });
+// --- 3. FIREBASE LISTENER AND STATE MANAGEMENT ---
+function setupFirestoreListener() {
+    if (!db || !userId) return;
+    const docRef = doc(db, getDocPath(userId));
+
+    onSnapshot(docRef, (docSnap) => {
+        if (docSnap.exists() && docSnap.data().stations) {
+            visitedStations = docSnap.data().stations;
+        } else {
+            // If no data, initialize as an empty object
+            visitedStations = {};
         }
+
+        // --- THIS IS THE NEW PART ---
+        // Calculate percentage and update the UI
+        const count = Object.keys(visitedStations).filter(k => visitedStations[k]).length;
+        const percentage = (count / TOTAL_STATIONS) * 100;
+
+        // Get the elements
+        const progressBarFill = document.getElementById('progress-bar-fill');
+        const statusMessage = document.getElementById('status-message-label');
+
+        if (progressBarFill) {
+            progressBarFill.style.width = `${percentage}%`;
+        }
+        if (statusMessage) {
+            statusMessage.textContent = `${count} / ${TOTAL_STATIONS} Stations Visited`;
+        }
+        // --- END OF NEW PART ---
+
+        renderStations(); // Re-draw markers based on the loaded data
+    }, (error) => {
+        console.error("Firestore listener error:", error);
+        // Use the label for errors too
+        const statusMessage = document.getElementById('status-message-label');
+        if (statusMessage) {
+            statusMessage.textContent = 'Error loading data.';
+        }
+    });
+}
 
         // Saves the updated state to Firestore
         async function updateStationState(stationId, isVisited) {
@@ -295,27 +314,45 @@
             }
         }
 
-        // --- 4. UI RENDERING AND INTERACTIVITY ---
-        function handleStationClick(stationId) {
-            
-            const currentStatus = visitedStations[stationId] || false;
-            const newStatus = !currentStatus;
-            
-            // 1. **IMMEDIATE UI UPDATE**: Update the local state and the marker color right away
-            visitedStations[stationId] = newStatus;
-            const marker = document.getElementById(`marker-${stationId}`);
-            if (marker) {
-                 // Using hex codes directly for guaranteed color change
-                marker.style.backgroundColor = newStatus ? COLOR_GREEN : COLOR_RED;
-            }
-            
-            // Update the counter immediately
-            const count = Object.keys(visitedStations).filter(k => visitedStations[k]).length;
-            document.getElementById('status-message').textContent = `${count} / ${TOTAL_STATIONS} Stops`;
+// --- 4. UI RENDERING AND INTERACTIVITY ---
+function handleStationClick(stationId) {
+    
+    if (!isAuthReady) { // Check if Firebase is ready
+        const statusLabel = document.getElementById('status-message-label');
+        if(statusLabel) statusLabel.textContent = 'Please wait, connecting...';
+        return;
+    }
 
-            // 2. **ASYNCHRONOUS PERSISTENCE**: Save the updated state to Firebase in the background
-            updateStationState(stationId, newStatus);
-        }
+    const currentStatus = visitedStations[stationId] || false;
+    const newStatus = !currentStatus;
+    
+    // 1. **IMMEDIATE UI UPDATE**: Update the local state object
+    visitedStations[stationId] = newStatus;
+    
+    // 2. Update the specific marker's color
+    const marker = document.getElementById(`marker-${stationId}`);
+    if (marker) {
+        // Using hex codes directly for guaranteed color change
+        marker.style.backgroundColor = newStatus ? COLOR_GREEN : COLOR_RED;
+    }
+    
+    // 3. **IMMEDIATE UI UPDATE**: Update the counter and progress bar
+    const count = Object.keys(visitedStations).filter(k => visitedStations[k]).length;
+    const percentage = (count / TOTAL_STATIONS) * 100;
+    
+    const progressBarFill = document.getElementById('progress-bar-fill');
+    const statusLabel = document.getElementById('status-message-label');
+
+    if (progressBarFill) {
+        progressBarFill.style.width = `${percentage}%`;
+    }
+    if (statusLabel) {
+        statusLabel.textContent = `${count} / ${TOTAL_STATIONS} Stations Visited`;
+    }
+
+    // 4. **ASYNCHRONOUS PERSISTENCE**: Save the updated state to Firebase
+    updateStationState(stationId, newStatus);
+}
 
         function renderStations() {
             const mapContainer = document.getElementById('map-container');
